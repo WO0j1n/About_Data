@@ -1,0 +1,214 @@
+---
+title: "Traffic Accident Report"
+output: 
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library( tidyverse )
+library( DT )
+library( sf )
+library( leaflet )
+library( summarytools )
+library( showtext )
+font_add_google(name = "Noto Sans KR", family = "NSK" )
+showtext_auto()
+```
+
+```{r message=FALSE, cache=TRUE, warning=FALSE}
+acc_wk <- readRDS("../data/acc_wk.rds")
+cars_pops_wk <- readRDS("../data/cars_pops_wk.rds")
+abbr_tab <- readRDS("../data/abbr_tab.rds")
+sido_shp <- read_sf("../data/bnd_sido_00_2023_2Q/bnd_sido_00_2023_2Q.shp", options = "ENCODING=UTF-8")
+sgg_shp <- read_sf("../data/bnd_sigungu_00_2023_2Q/bnd_sigungu_00_2023_2Q.shp", options = "ENCODING=UTF-8")
+```
+
+
+
+## 개요
+
+### 배경 및 목적
+안전에 대한 사회적인 요구는 갈수록 증가하고 있으며, 일상 생활에서 이동 수단은 뗄래야 뗄 수 없는 관계입니다. 이동 수단은 삶의 질을 향상하는 중요한 요소이나, 사고 특히 인명 피해를 동반하는 사고가 발생하고 있습니다. 과학기술의 발달로 자동차의 안전과 관련한 다양한 기능이 추가되고 있으나 자동차 만의 발달로 사고를 완전히 예방할 수는 없습니다. 
+
+이에 데이터 기반으로 교통사고를 살펴보고 사고를 줄이기 위한 방안을 고민하는 연구자들에게 정보를 제공하고자 합니다.
+
+### 분석 방법 
+2023년에 발생한 교통사고의  발생시점과 위치를 중심으로 사망자가 발생하는 교통사고에 대해 분석하고자 합니다.
+
+### 데이터 출처
+
+분석에 사용한 인구는 행정안전부의 [주민등록인구통계](https://jumin.mois.go.kr)에서 추출하였으며, 사망사고 발생 데이터는 도로교통공단의 [교통사고정보 개방시스템](https://taas.koroad.or.kr/api/)의 [사망교통사고정보 API](https://taas.koroad.or.kr/api/selectDeathDataSet.do) 에서 제공한 데이터를 활용하였습니다.
+
+
+## 주요 내용
+
+```{r data2023, cache=TRUE}
+acc_wk %>% 
+  mutate( years = format(date, format="%Y") ) %>%
+  filter( years == "2023" ) %>%
+  rename(시도 = 발생지시도, 시군구 = 발생지시군구) %>%
+  select(시도, 시군구, date, hour, day_night, days, acc_cat, road_cat, 
+         사망자수, 중상자수, 경상자수, 경도, 위도) -> acc_2023_wk
+```
+
+도로교통공단의 데이터셋 중 2023년의 사고에 대해서만 살펴보겠습니다. 다음은 분석을 위해 원본 데이터를 수정한 후 2023년 사고들을 선택하여 본 보고서에 사용한 데이터셋입니다.
+
+```{r}
+datatable( acc_2023_wk,
+           colnames = c("No" = 1, "날짜" = 4, "시간" = 5, "주야" = 6,
+                        "요일" = 7, "사고유형" = 8, "도로유형" = 9) )
+```
+
+#### 피해자수의 특성
+데이터셋을 구성하는 각 열별 데이터를 요약해 봅시다. 먼저 피해자수 현황입니다. 
+다음의 표에서 보이는 것과 같이 인명피해는 사망사고의 경우 평균과 표준편차는 `r round(mean(acc_2023_wk$사망자수), 1)` $\pm$ `r round( sd(acc_2023_wk$사망자수), 2)`, 경상자수는 `r round(mean(acc_2023_wk$경상자수), 1)` $\pm$ `r round( sd(acc_2023_wk$경상자수), 2)`, 중상자수는 `r round(mean(acc_2023_wk$중상자수), 1)` $\pm$ `r round( sd(acc_2023_wk$중상자수), 2)`이며, 제 3사분위수(전체 자료의 75%되는 위치의 값)가 사망사고의 경우 1명, 경상 혹은 중상자의 경우 0명으로 대부분의 사고에서 인명피해가 크지 않았습니다.
+
+```{r}
+print(
+  descr( acc_2023_wk %>% select(ends_with("수")), 
+         stats = c("mean", "sd", "min", "q1", "med", "q3", "max"),
+         round.digits = 1,
+         transpose = TRUE, headings = FALSE),
+  method="render",
+  table.class = "st-small", footnote="" )
+```
+
+상자도표로 사상자를 표현하면 다음과 같습니다.
+
+
+```{r fig.align="center", fig.width=8, fig.height=4, fig.cap="[상해정도에 따른 인명피해]"}
+acc_2023_wk %>%
+  select( ends_with("수"), acc_cat) %>%
+  pivot_longer( cols=ends_with("수") ) %>%
+  filter( acc_cat !="철길건널목") %>%
+  ggplot() +
+    geom_boxplot( aes(name, value, color=name) ) +
+    scale_color_manual("상해정도", values=c('#e41a1c','#377eb8','#4daf4a') ) +
+    facet_wrap( vars(acc_cat), ncol=3 ) +
+    theme_minimal() +
+    theme(
+      text = element_text(family="NSK", size=12),
+      axis.title = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+```
+
+
+### 발생시간에 따른 사고 현황
+
+#### 주/야간 발생 현황
+
+#### 요일별 발생 현황
+
+요일별 사망사고발생 수와 비율은 다음과 같습니다.
+
+```{r echo=FALSE}
+acc_2023_wk %>%
+  group_by( days ) %>%
+  summarise(
+    n = n(),
+  ) %>%
+  mutate( prop = n / sum(n) ) -> days_freq_prop
+
+knitr::kable( days_freq_prop, 
+              col.names=c("요일", "사고발생(건)", "비율"), align="c", digits = 2 )
+```
+
+주초에서 주말로 갈수록 사망사고 줄어드는 것으로 보여, 요일별 사망사고발생 비율이 차이가 있는지 알아보고자 합니다. 이를 위해 유의수준 0.05에서 적합도 검정을 실시했습니다.
+
+```{r echo=FALSE}
+ct_result <- chisq.test( days_freq_prop$n )
+```
+
+검정결과 검정통계량 **`r round(ct_result$statistic, 3)`**, p-value **`r round(ct_result$p.value, 3)`**으로 요일별 사망사고발생비율에는 차이가 있다는 통계적으로 유의한 결과를 얻을 수 있습니다. 즉, 요일에 따라 사망사고 발생은 차이가 있으며 특히 주말간 사망사고발생이 다른 요일에 비해 낮은 것을 확인할 수 있습니다.
+
+
+### 위치 기반 사고 현황
+
+#### 전국 현황
+
+사고유형별로 사고 발생지역을 지도 위에서 살펴봅시다.
+
+```{r warning=FALSE}
+library( leaflet )
+
+pal_ta_type <- colorFactor(
+  palette = c('#e41a1c','#377eb8','#4daf4a','#984ea3'),
+  domain = levels( acc_2023_wk$acc_cat ),
+  na.color = NA )
+
+leaflet( data = acc_2023_wk ) %>%
+  setView( lat = 36.0000, lng = 127.7492, zoom = 7) %>%
+  addProviderTiles("Stamen.Toner")  %>%
+  addCircleMarkers( 
+    lng = ~경도, lat = ~위도,
+    fillColor = ~pal_ta_type(acc_cat), 
+    fillOpacity = 0.8, 
+    stroke = FALSE,
+    radius = ~사망자수,
+    popup = ~paste0("사망자수 : <b>", 사망자수, "</b><br />", "사고유형 : ", acc_cat, "<br>", "도로유형 : ", road_cat ) ) %>%
+  addLegend( "topright", 
+            pal = pal_ta_type, values = ~acc_cat,
+            title = "사고 유형",
+            na.label = "",
+            opacity = 0.8
+  )
+```
+
+
+
+
+#### 시도별 현황
+
+시도별 지도를 작성해 봅시다.
+앞서 읽어온 시도별 셰이프파일을 그려 봅시다.
+
+```{r message=FALSE}
+plot( sido_shp[, 1] )
+```
+
+셰이프파일은 데이터를 포함하고 있어 이를 출력해 봅시다.
+
+```{r message=FALSE}
+sido_shp
+```
+
+데이터를 준비합니다.
+
+```{r}
+acc_2023_wk %>%
+  group_by( 시도 ) %>%
+  summarise(
+    n.death = sum(사망자수, na.rm=TRUE)
+  )  -> sido_2023_death
+
+sido_2023_death %>%
+  left_join( abbr_tab, by=c("시도" = "abbrName") ) -> sido_2023_death
+
+sido_shp %>% 
+  left_join( sido_2023_death, by=c("SIDO_CD" = "regionCode") ) -> ta_death_sido
+```
+
+ggplot2를 이용해 시각화를 수행해 봅시다.
+셰이프파일을 그리기 위해 geom_sf() 를 사용합니다.
+
+```{r}
+ggplot( ta_death_sido ) +
+  geom_sf( aes(fill = n.death ) ) +
+  labs( fill = "사망자수" ) +
+  theme_void()
+```
+
+
+## 정리 및 시사점
+
+### 교통사고 발생
+
+### 시사점
+
